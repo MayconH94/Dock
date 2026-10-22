@@ -1,0 +1,11 @@
+{
+  "name": "Natal",
+  "color": "#7a1010",
+  "opacity": 0.55,
+  "radius": 22,
+  "blur": 20,
+  "itemColor": "rgba(255, 255, 255, 0.22)",
+  "accent": "#1f9d45",
+  "decor": "🎄",
+  "effect": "lights,snow,santa"
+}

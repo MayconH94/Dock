@@ -1,0 +1,11 @@
+{
+  "name": "Halloween",
+  "color": "#1a0a2e",
+  "opacity": 0.6,
+  "radius": 22,
+  "blur": 20,
+  "itemColor": "rgba(255, 122, 0, 0.16)",
+  "accent": "#ff7a00",
+  "decor": "🎃",
+  "effect": "bats"
+}

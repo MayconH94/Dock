@@ -1,0 +1,11 @@
+{
+  "name": "Padrão",
+  "color": "#000000",
+  "opacity": 0.35,
+  "radius": 20,
+  "blur": 20,
+  "itemColor": "rgba(255, 255, 255, 0.25)",
+  "accent": "#0066ff",
+  "decor": "",
+  "effect": ""
+}

@@ -1,0 +1,175 @@
+/* Importante: html e body totalmente transparentes */
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: transparent !important;
+  overflow: hidden;
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* A barra principal que agrupa tudo (borda infinita contínua) */
+#dock {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(var(--dock-rgb, 0, 0, 0), var(--dock-opacity, 0.35));
+  backdrop-filter: blur(var(--dock-blur, 20px));
+  -webkit-backdrop-filter: blur(var(--dock-blur, 20px));
+  padding: 8px 14px;
+  border-radius: var(--dock-radius, 20px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  max-width: calc(100vw - 20px);
+  position: relative;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#dock::before,
+#dock::after {
+  content: var(--decor, "");
+  display: var(--decor-display, none);
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+#dock::-webkit-scrollbar {
+  display: none;
+}
+
+/* Itens / Ícones Padrão */
+.dock-item {
+  width: var(--item-size, 44px);
+  height: var(--item-size, 44px);
+  border-radius: calc(var(--item-size, 44px) * 0.27);
+  background: var(--item-bg, rgba(255, 255, 255, 0.25));
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.dock-item:hover {
+  transform: translateY(-4px);
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.dock-item img {
+  width: calc(var(--item-size, 44px) * 0.55);
+  height: calc(var(--item-size, 44px) * 0.55);
+  object-fit: contain;
+  pointer-events: none;
+}
+
+/* Divisor vertical entre os blocos */
+.dock-separator {
+  width: 1px;
+  height: 28px;
+  background: rgba(0, 0, 0, 0.15);
+  margin: 0 4px;
+}
+
+/* Pisca-pisca (efeito do tema Natal) */
+.dock-lights {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  height: 8px;
+  display: flex;
+  justify-content: space-around;
+  pointer-events: none;
+}
+
+.dock-lights span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px 2px currentColor;
+  animation: twinkle 1.6s infinite ease-in-out;
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+/* Posição da barra dentro da janela (com espaço livre para os efeitos) */
+body {
+  box-sizing: border-box;
+  align-items: flex-end;
+  padding-bottom: 15px;
+}
+
+body[data-pos="top"] {
+  align-items: flex-start;
+  padding-bottom: 0;
+  padding-top: 15px;
+}
+
+#dock { z-index: 1; }
+
+/* Camada de efeitos (morcegos, neve, Papai Noel) */
+#fx {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.bat {
+  position: absolute;
+  left: -10%;
+  animation-name: batfly, batbob;
+  animation-timing-function: linear, ease-in-out;
+  animation-iteration-count: infinite, infinite;
+  animation-duration: var(--fly, 10s), var(--bob, 1.6s);
+  animation-delay: var(--delay, 0s), 0s;
+}
+
+.bat span {
+  display: block;
+  animation: batflap 0.35s ease-in-out infinite;
+}
+
+@keyframes batfly { from { left: -10%; } to { left: 110%; } }
+@keyframes batbob { 0%, 100% { margin-top: 0; } 50% { margin-top: -14px; } }
+@keyframes batflap { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(0.5); } }
+
+.flake {
+  position: absolute;
+  top: -8%;
+  color: #fff;
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.7);
+  animation-name: snowfall, sway;
+  animation-timing-function: linear, ease-in-out;
+  animation-iteration-count: infinite, infinite;
+  animation-direction: normal, alternate;
+  animation-duration: var(--fall, 7s), var(--sway, 2s);
+  animation-delay: var(--delay, 0s), 0s;
+}
+
+@keyframes snowfall { from { top: -8%; } to { top: 104%; } }
+@keyframes sway { from { margin-left: -10px; } to { margin-left: 10px; } }
+
+.santa {
+  position: absolute;
+  top: 6%;
+  left: 112%;
+  font-size: 30px;
+  white-space: nowrap;
+  animation: santafly 24s linear infinite, santabob 2s ease-in-out infinite;
+}
+
+@keyframes santafly {
+  0% { left: 112%; }
+  55% { left: -30%; }
+  100% { left: -30%; }
+}
+@keyframes santabob { 0%, 100% { margin-top: 0; } 50% { margin-top: 8px; } }

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>Configurações do dock</title>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 18px 20px; background: #f5f5f7; color: #222; font-size: 13px; }
+  h1 { font-size: 16px; margin: 0 0 14px; }
+  .row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .label { display: flex; justify-content: space-between; }
+  .label span:last-child { color: #666; }
+  input[type=range] { width: 100%; }
+  input[type=color] { width: 100%; height: 30px; border: 1px solid #ccc; border-radius: 6px; padding: 2px; background: #fff; }
+  select { padding: 6px; border-radius: 6px; border: 1px solid #ccc; }
+  button { margin-top: 4px; padding: 8px; border: 0; border-radius: 6px; background: #0066ff; color: #fff; cursor: pointer; }
+  button:hover { background: #0052cc; }
+</style>
+</head>
+<body>
+  <h1>Personalizar dock</h1>
+  <div class="row"><div class="label"><span>Tema</span></div>
+    <select id="theme"></select></div>
+  <div class="row"><div class="label"><span>Transparência da barra</span><span id="v-opacity"></span></div>
+    <input type="range" id="opacity" min="0" max="100" step="1"></div>
+  <div class="row"><div class="label"><span>Cor da barra</span></div>
+    <input type="color" id="color"></div>
+  <div class="row"><div class="label"><span>Tamanho dos ícones</span><span id="v-iconSize"></span></div>
+    <input type="range" id="iconSize" min="32" max="64" step="1"></div>
+  <div class="row"><div class="label"><span>Arredondamento</span><span id="v-radius"></span></div>
+    <input type="range" id="radius" min="0" max="40" step="1"></div>
+  <div class="row"><div class="label"><span>Desfoque</span><span id="v-blur"></span></div>
+    <input type="range" id="blur" min="0" max="40" step="1"></div>
+  <div class="row"><div class="label"><span>Posição na tela</span></div>
+    <select id="position"><option value="bottom">Embaixo</option><option value="top">Em cima</option></select></div>
+  <button id="reset">Restaurar padrão</button>
+
+<script>
+const { ipcRenderer } = require('electron');
+const ids = ['theme', 'opacity', 'color', 'iconSize', 'radius', 'blur', 'position'];
+const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
+let timer;
+
+function show(s) {
+  el.theme.value = s.theme || 'padrao';
+  el.opacity.value = Math.round(s.opacity * 100);
+  el.color.value = s.color;
+  el.iconSize.value = s.iconSize;
+  el.radius.value = s.radius;
+  el.blur.value = s.blur;
+  el.position.value = s.position;
+  labels();
+}
+function labels() {
+  document.getElementById('v-opacity').textContent = el.opacity.value + '%';
+  document.getElementById('v-iconSize').textContent = el.iconSize.value + ' px';
+  document.getElementById('v-radius').textContent = el.radius.value + ' px';
+  document.getElementById('v-blur').textContent = el.blur.value + ' px';
+}
+function collect() {
+  return {
+    opacity: Number(el.opacity.value) / 100,
+    color: el.color.value,
+    iconSize: Number(el.iconSize.value),
+    radius: Number(el.radius.value),
+    blur: Number(el.blur.value),
+    position: el.position.value,
+    theme: el.theme.value
+  };
+}
+function send() {
+  labels();
+  clearTimeout(timer);
+  timer = setTimeout(() => ipcRenderer.send('save-settings', collect()), 60);
+}
+ids.filter((id) => id !== 'theme').forEach((id) => el[id].addEventListener('input', send));
+el.theme.addEventListener('change', async () => {
+  show(await ipcRenderer.invoke('apply-theme', el.theme.value));
+});
+document.getElementById('reset').addEventListener('click', async () => {
+  show(await ipcRenderer.invoke('reset-settings'));
+});
+(async () => {
+  const themes = await ipcRenderer.invoke('get-themes');
+  el.theme.innerHTML = themes.map((t) => '<option value="' + t.id + '">' + t.name + '</option>').join('');
+  show(await ipcRenderer.invoke('get-settings'));
+})();
+</script>
+</body>
+</html>

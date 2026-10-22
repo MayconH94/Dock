@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.bak*
+icon-debug.log
+
+# dados pessoais (ficam em %APPDATA% quando instalado)
+shortcuts.json
+settings.json
+icons/

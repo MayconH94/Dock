@@ -1,0 +1,34 @@
+{
+  "name": "win-dock",
+  "version": "1.0.0",
+  "description": "Dock customizável para Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^44.9.2"
+  },
+  "build": {
+    "appId": "com.maycon.windock",
+    "productName": "Win Dock",
+    "files": [
+      "**/*",
+      "!**/*.bak*",
+      "!icon-debug.log",
+      "!shortcuts.json",
+      "!settings.json",
+      "!icons/**",
+      "!dist/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

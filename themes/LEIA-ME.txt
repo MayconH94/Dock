@@ -1,0 +1,8 @@
+Para criar um tema novo: copie um destes arquivos .json, mude o nome do arquivo e os valores.
+- name: nome mostrado na lista
+- color / opacity / radius / blur: aparência da barra (cor em #rrggbb, opacity de 0 a 1)
+- itemColor: cor de fundo dos ícones (qualquer cor CSS, ex.: "rgba(255, 0, 0, 0.5)")
+- accent: cor do botão inicial
+- decor: emoji nas pontas da barra (deixe "" para nenhum)
+- effect: efeitos separados por vírgula: lights (pisca-pisca), snow (neve), santa (Papai Noel), bats (morcegos). Deixe "" para nenhum
+Depois abra a janela de configurações e escolha o tema na lista.
