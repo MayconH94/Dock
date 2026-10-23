@@ -17,6 +17,7 @@ for (const name of ['shortcuts.json', 'settings.json', 'icons', 'themes']) {
   } catch (e) {}
 }
 fs.mkdirSync(path.join(dataDir, 'icons'), { recursive: true });
+fs.mkdirSync(path.join(dataDir, 'widgets'), { recursive: true });
 ipcMain.on('user-data-path', (event) => { event.returnValue = dataDir; });
 
 let dockWin = null;
@@ -25,7 +26,7 @@ let settingsWin = null;
 const settingsPath = path.join(dataDir, 'settings.json');
 const defaultSettings = {
   theme: 'padrao', opacity: 0.35, color: '#000000', radius: 20, iconSize: 44, blur: 20, position: 'bottom',
-  itemColor: 'rgba(255, 255, 255, 0.25)', accent: '#0066ff', decor: '', effect: ''
+  itemColor: 'rgba(255, 255, 255, 0.25)', accent: '#0066ff', decor: '', effect: '', widgets: []
 };
 const themesDir = path.join(__dirname, 'themes');          // temas que vêm com o app
 const userThemesDir = path.join(dataDir, 'themes');        // temas criados por você
@@ -213,7 +214,7 @@ ipcMain.handle('reset-settings', () => {
 ipcMain.on('open-settings', () => {
   if (settingsWin) { settingsWin.focus(); return; }
   settingsWin = new BrowserWindow({
-    width: 340, height: 540, title: 'Configurações do dock',
+    width: 340, height: 620, title: 'Configurações do dock',
     autoHideMenuBar: true, resizable: false, alwaysOnTop: true,
     webPreferences: { nodeIntegration: true, contextIsolation: false }
   });

@@ -12,6 +12,8 @@
   input[type=range] { width: 100%; }
   input[type=color] { width: 100%; height: 30px; border: 1px solid #ccc; border-radius: 6px; padding: 2px; background: #fff; }
   select { padding: 6px; border-radius: 6px; border: 1px solid #ccc; }
+  #widgets label { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
+  #widgets .vazio { color: #888; font-size: 12px; }
   button { margin-top: 4px; padding: 8px; border: 0; border-radius: 6px; background: #0066ff; color: #fff; cursor: pointer; }
   button:hover { background: #0052cc; }
 </style>
@@ -32,15 +34,56 @@
     <input type="range" id="blur" min="0" max="40" step="1"></div>
   <div class="row"><div class="label"><span>Posição na tela</span></div>
     <select id="position"><option value="bottom">Embaixo</option><option value="top">Em cima</option></select></div>
+  <div class="row"><div class="label"><span>Widgets</span></div>
+    <div id="widgets"></div></div>
   <button id="reset">Restaurar padrão</button>
 
 <script>
 const { ipcRenderer } = require('electron');
+const fs = require('fs');
+const path = require('path');
 const ids = ['theme', 'opacity', 'color', 'iconSize', 'radius', 'blur', 'position'];
 const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 let timer;
 
+const widgetDirs = [
+  path.join(ipcRenderer.sendSync('user-data-path'), 'widgets'),
+  path.join(__dirname, 'widgets')
+];
+function listWidgets() {
+  const found = new Map();
+  for (const dir of widgetDirs) {
+    let files = [];
+    try { files = fs.readdirSync(dir); } catch (e) {}
+    for (const f of files) {
+      if (!f.endsWith('.js') || f.startsWith('_')) continue;
+      const id = path.parse(f).name;
+      if (found.has(id)) continue;
+      let name = id;
+      try { name = require(path.join(dir, f)).name || id; } catch (e) {}
+      found.set(id, name);
+    }
+  }
+  return [...found].map(([id, name]) => ({ id, name }));
+}
+function showWidgets(enabled) {
+  const box = document.getElementById('widgets');
+  const all = listWidgets();
+  box.innerHTML = all.length ? '' : '<div class="vazio">Nenhum widget encontrado. Veja widgets/_modelo.js</div>';
+  all.forEach((w) => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = w.id;
+    cb.checked = enabled.includes(w.id);
+    cb.addEventListener('change', send);
+    label.append(cb, w.name);
+    box.appendChild(label);
+  });
+}
+
 function show(s) {
+  showWidgets(s.widgets || []);
   el.theme.value = s.theme || 'padrao';
   el.opacity.value = Math.round(s.opacity * 100);
   el.color.value = s.color;
@@ -64,7 +107,8 @@ function collect() {
     radius: Number(el.radius.value),
     blur: Number(el.blur.value),
     position: el.position.value,
-    theme: el.theme.value
+    theme: el.theme.value,
+    widgets: [...document.querySelectorAll('#widgets input:checked')].map((c) => c.value)
   };
 }
 function send() {

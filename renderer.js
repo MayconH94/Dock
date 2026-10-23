@@ -7,6 +7,8 @@ const configPath = path.join(ipcRenderer.sendSync('user-data-path'), 'shortcuts.
 
 let shortcuts = [];
 let currentEffect = '';
+let enabledWidgets = [];
+let widgetCleanups = [];
 
 function loadShortcuts() {
     try {
@@ -95,6 +97,7 @@ function renderDock() {
         dock.appendChild(createSeparator());
     }
 
+    mountWidgets();
     fitWindow();
 }
 
@@ -149,7 +152,13 @@ function applySettings(s) {
     root.setProperty('--decor-display', s.decor ? 'block' : 'none');
     document.body.dataset.pos = s.position || 'bottom';
     currentEffect = s.effect || '';
-    fitWindow();
+    const wanted = s.widgets || [];
+    if (JSON.stringify(wanted) !== JSON.stringify(enabledWidgets)) {
+        enabledWidgets = wanted;
+        renderDock();
+    } else {
+        fitWindow();
+    }
 }
 ipcRenderer.invoke('get-settings').then(applySettings);
 ipcRenderer.on('settings-changed', (e, s) => applySettings(s));
@@ -241,3 +250,53 @@ function fitWindow() {
 
 // Rolagem horizontal com a roda do mouse quando passar do limite da tela
 dock.addEventListener('wheel', (e) => { dock.scrollLeft += e.deltaY; });
+
+// ---- Widgets: arquivos .js nas pastas "widgets" (do app e do usuário) ----
+const widgetApi = {
+    openUrl: (url) => shell.openExternal(url),
+    openPath: (p) => shell.openPath(p),
+    dataDir: path.dirname(configPath),
+    refreshLayout: () => fitWindow()
+};
+
+function findWidgetFile(id) {
+    const dirs = [path.join(widgetApi.dataDir, 'widgets'), path.join(__dirname, 'widgets')];
+    for (const dir of dirs) {
+        const file = path.join(dir, id + '.js');
+        if (fs.existsSync(file)) return file;
+    }
+    return null;
+}
+
+function mountWidgets() {
+    widgetCleanups.forEach((fn) => { try { fn(); } catch (e) {} });
+    widgetCleanups = [];
+    document.querySelectorAll('style[data-widget]').forEach((s) => s.remove());
+
+    for (const id of enabledWidgets) {
+        const file = findWidgetFile(id);
+        if (!file) continue;
+
+        const box = document.createElement('div');
+        box.className = 'dock-widget';
+        box.dataset.widget = id;
+        dock.appendChild(box);
+
+        try {
+            delete require.cache[require.resolve(file)];
+            const mod = require(file);
+            if (mod.css) {
+                const style = document.createElement('style');
+                style.dataset.widget = id;
+                style.textContent = mod.css;
+                document.head.appendChild(style);
+            }
+            const cleanup = mod.setup && mod.setup(box, widgetApi);
+            if (typeof cleanup === 'function') widgetCleanups.push(cleanup);
+        } catch (e) {
+            box.textContent = '⚠ ' + id;
+            box.title = String(e);
+            console.error('Erro no widget ' + id, e);
+        }
+    }
+}
