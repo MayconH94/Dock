@@ -3,24 +3,39 @@ const fs = require('fs');
 const path = require('path');
 
 const dock = document.getElementById('dock');
+const startBtn = document.getElementById('start');
+const secPinned = document.getElementById('sec-pinned');
+const secRunning = document.getElementById('sec-running');
+const secWidgets = document.getElementById('sec-widgets');
+const sepA = document.getElementById('sep-a');
+const sepB = document.getElementById('sep-b');
+const sepW = document.getElementById('sep-w');
+const tip = document.getElementById('tip');
 const configPath = path.join(ipcRenderer.sendSync('user-data-path'), 'shortcuts.json');
 
 let shortcuts = [];
+let windows = [];            // janelas abertas (vindas do processo principal)
+let settings = {};
 let currentEffect = '';
 let enabledWidgets = [];
 let widgetCleanups = [];
+let runOrder = [];           // ordem estável dos grupos abertos que não estão fixados
+const targets = new Map();   // caminho do atalho -> programa de destino (minúsculo)
+const exeIcons = new Map();  // exe -> ícone
+const send = (...a) => ipcRenderer.send(...a);
 
+// ---------- Atalhos fixados ----------
 function loadShortcuts() {
     try {
         if (fs.existsSync(configPath)) {
-            const data = fs.readFileSync(configPath, 'utf-8');
-            shortcuts = JSON.parse(data);
+            shortcuts = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
             if (!Array.isArray(shortcuts)) shortcuts = [];
         }
     } catch (e) {
         shortcuts = [];
     }
-    renderDock();
+    render();
+    resolveTargets();
     refreshIcons();
 }
 
@@ -34,7 +49,20 @@ async function refreshIcons() {
             if (icon && icon !== item.iconData) { item.iconData = icon; changed = true; }
         } catch (e) {}
     }
-    if (changed) { saveShortcuts(); renderDock(); }
+    if (changed) { saveShortcuts(); render(); }
+}
+
+// Descobre o programa real de cada atalho, para saber se já está aberto
+async function resolveTargets() {
+    let added = false;
+    for (const item of shortcuts) {
+        if (!item.path || targets.has(item.path)) continue;
+        try {
+            targets.set(item.path, String(await ipcRenderer.invoke('resolve-target', item.path) || '').toLowerCase());
+            added = true;
+        } catch (e) { targets.set(item.path, ''); }
+    }
+    if (added) render();
 }
 
 function saveShortcuts() {
@@ -45,73 +73,295 @@ function saveShortcuts() {
     }
 }
 
-function renderDock() {
-    // Mantém o botão Iniciar e os separadores fixos, limpando apenas os atalhos dinâmicos anteriores
-    // Para simplificar, vamos redesenhar a barra mantendo a estrutura:
-    dock.innerHTML = '';
+// ---------- Ligação atalho <-> janela ----------
+const compact = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const exeBase = (exe) => compact(path.basename(exe || '', path.extname(exe || '')));
 
-    // 1. Botão Iniciar Fixo
-    const startBtn = document.createElement('div');
-    startBtn.className = 'dock-item';
-    startBtn.style.background = 'var(--accent, #0066ff)';
-    startBtn.innerHTML = `<span style="color: white; font-weight: bold; font-size: 16px; pointer-events: none;">❖</span>`;
-    startBtn.title = 'Clique direito para personalizar';
-    startBtn.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        ipcRenderer.send('open-settings');
+function matches(item, w) {
+    const exe = w.exe.toLowerCase();
+    const target = targets.get(item.path);
+    if (target && target === exe && !w.key.startsWith('uwp:')) return true;
+    // Apps da Store, pastas e atalhos sem destino claro: compara pelo nome
+    const name = compact(item.name);
+    if (name.length < 3) return false;
+    return exeBase(w.exe) === name || compact(w.title).includes(name);
+}
+
+// Divide as janelas entre os atalhos fixados e os grupos "soltos"
+function buildModel() {
+    const used = new Set();
+    const pinned = shortcuts.map((item) => {
+        const wins = windows.filter((w) => !used.has(w.hwnd) && matches(item, w));
+        wins.forEach((w) => used.add(w.hwnd));
+        return { item, wins };
     });
-    dock.appendChild(startBtn);
 
-    dock.appendChild(createSeparator());
-
-    // 2. Atalhos do Utilizador
-    if (shortcuts.length > 0) {
-        shortcuts.forEach((item, index) => {
-            const div = document.createElement('div');
-            div.className = 'dock-item';
-            div.title = `${item.name} (Clique direito para remover)`;
-
-            if (item.iconData) {
-                div.innerHTML = `<img src="${item.iconData}" style="pointer-events: none;" />`;
-            } else {
-                const initial = item.name ? item.name.charAt(0).toUpperCase() : '📁';
-                div.innerHTML = `<span style="color: #333; font-size: 14px; font-family: sans-serif; font-weight: bold; pointer-events: none;">${initial}</span>`;
-            }
-
-            // Abrir aplicação
-            div.addEventListener('click', () => {
-                if (item.path) shell.openPath(item.path);
-            });
-
-            // Remover com o Botão Direito (Garantido em qualquer parte do ícone)
-            div.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                shortcuts.splice(index, 1);
-                saveShortcuts();
-                renderDock();
-            });
-
-            dock.appendChild(div);
-        });
-        dock.appendChild(createSeparator());
+    const groups = new Map();
+    for (const w of windows) {
+        if (used.has(w.hwnd)) continue;
+        if (!groups.has(w.key)) groups.set(w.key, []);
+        groups.get(w.key).push(w);
     }
-
-    mountWidgets();
-    fitWindow();
+    runOrder = runOrder.filter((k) => groups.has(k));
+    for (const k of groups.keys()) if (!runOrder.includes(k)) runOrder.push(k);
+    return { pinned, running: runOrder.map((key) => ({ key, wins: groups.get(key) })) };
 }
 
-function createSeparator() {
-    const sep = document.createElement('div');
-    sep.className = 'dock-separator';
-    return sep;
+// ---------- Ações de janela ----------
+// Clique em um app aberto: traz para frente; se já está na frente, minimiza (ou passa para a próxima janela)
+function toggleGroup(wins) {
+    const active = wins.find((w) => w.active);
+    if (!active) { send('window-action', 'activate', wins[0].hwnd); return; }
+    if (wins.length === 1) { send('window-action', 'minimize', active.hwnd); return; }
+    const ordered = [...wins].sort((a, b) => a.hwnd - b.hwnd);
+    const next = ordered[(ordered.findIndex((w) => w.hwnd === active.hwnd) + 1) % ordered.length];
+    send('window-action', 'activate', next.hwnd);
 }
 
-// Drag and Drop com extração de ícone segura
+async function menu(items) {
+    tip.classList.remove('show');
+    return ipcRenderer.invoke('context-menu', items);
+}
+
+async function pinnedMenu(ctx) {
+    const items = [{ id: 'open', label: ctx.wins.length ? 'Abrir nova janela' : 'Abrir' }];
+    if (ctx.wins.length) items.push({ id: 'close', label: ctx.wins.length > 1 ? 'Fechar todas as janelas' : 'Fechar janela' });
+    items.push({ separator: true }, { id: 'unpin', label: 'Desafixar do dock' });
+    const choice = await menu(items);
+    if (choice === 'open') shell.openPath(ctx.item.path);
+    else if (choice === 'close') ctx.wins.forEach((w) => send('window-action', 'close', w.hwnd));
+    else if (choice === 'unpin') {
+        shortcuts.splice(shortcuts.indexOf(ctx.item), 1);
+        saveShortcuts();
+        render();
+    }
+}
+
+async function runningMenu(ctx) {
+    const choice = await menu([
+        { id: 'pin', label: 'Fixar no dock' },
+        { id: 'close', label: ctx.wins.length > 1 ? 'Fechar todas as janelas' : 'Fechar janela' }
+    ]);
+    if (choice === 'close') ctx.wins.forEach((w) => send('window-action', 'close', w.hwnd));
+    else if (choice === 'pin') pinWindow(ctx.wins[0]);
+}
+
+async function pinWindow(w) {
+    if (!w.exe || shortcuts.some((s) => s.path === w.exe)) return;
+    const name = path.basename(w.exe, path.extname(w.exe));
+    const iconData = exeIcons.get(w.key) || await ipcRenderer.invoke('get-icon', w.exe, name)
+        || await ipcRenderer.invoke('get-window-icon', w.hwnd);
+    shortcuts.push({ name, path: w.exe, iconData });
+    targets.set(w.exe, w.exe.toLowerCase());
+    saveShortcuts();
+    render();
+}
+
+// ---------- Renderização por chaves ----------
+// Em vez de recriar tudo, reaproveita os elementos (animações e hover continuam) e anima entradas/saídas.
+function reconcile(container, entries) {
+    const existing = new Map();
+    for (const el of container.children) {
+        if (el.dataset.key !== undefined && !el.classList.contains('leaving')) existing.set(el.dataset.key, el);
+    }
+    const wanted = new Set(entries.map((e) => e.key));
+    for (const [key, el] of existing) {
+        if (wanted.has(key)) continue;
+        el.classList.remove('entering');
+        el.classList.add('leaving');
+        setTimeout(() => el.remove(), 260);
+    }
+    let prev = null;
+    for (const e of entries) {
+        let el = existing.get(e.key);
+        if (!el) {
+            el = createItem();
+            el.dataset.key = e.key;
+            el.classList.add('entering');
+            el.addEventListener('animationend', () => el.classList.remove('entering'), { once: true });
+        }
+        el._ctx = e.ctx;
+        paintItem(el, e);
+        const ref = prev ? prev.nextSibling : container.firstChild;
+        if (el !== ref) container.insertBefore(el, ref);
+        prev = el;
+    }
+}
+
+function createItem() {
+    const el = document.createElement('div');
+    el.className = 'dock-item';
+    const dots = document.createElement('div');
+    dots.className = 'dots';
+    el.appendChild(dots);
+
+    el.addEventListener('click', () => {
+        const c = el._ctx;
+        if (c.wins.length) toggleGroup(c.wins);
+        else if (c.item && c.item.path) shell.openPath(c.item.path);
+    });
+    el.addEventListener('auxclick', (e) => {      // botão do meio abre outra janela
+        if (e.button === 1 && el._ctx.item) shell.openPath(el._ctx.item.path);
+    });
+    el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (el._ctx.item) pinnedMenu(el._ctx); else runningMenu(el._ctx);
+    });
+    el.addEventListener('mouseenter', () => showTip(el));
+    el.addEventListener('mouseleave', () => tip.classList.remove('show'));
+    return el;
+}
+
+function paintItem(el, e) {
+    const { wins } = e.ctx;
+    setIcon(el, e.icon, e.label);
+    el.classList.toggle('active', wins.some((w) => w.active));
+    el.classList.toggle('minimized', wins.length > 0 && wins.every((w) => w.minimized));
+    el._tip = e.tip;
+
+    const dots = el.querySelector('.dots');
+    const n = Math.min(wins.length, 3);
+    while (dots.children.length < n) dots.appendChild(document.createElement('i'));
+    while (dots.children.length > n) dots.lastChild.remove();
+    const activeIndex = wins.findIndex((w) => w.active);
+    [...dots.children].forEach((d, i) => d.classList.toggle('on', i === Math.max(activeIndex, 0)));
+}
+
+function setIcon(el, src, label) {
+    let img = el.querySelector('img');
+    let initial = el.querySelector('.initial');
+    if (src) {
+        if (initial) initial.remove();
+        if (!img) { img = document.createElement('img'); el.prepend(img); }
+        if (el._src !== src) { img.src = src; el._src = src; }
+    } else {
+        if (img) { img.remove(); el._src = null; }
+        if (!initial) { initial = document.createElement('span'); initial.className = 'initial'; el.prepend(initial); }
+        initial.textContent = label ? label.charAt(0).toUpperCase() : '📁';
+    }
+}
+
+function render() {
+    const { pinned, running } = buildModel();
+    const showRunning = settings.taskbar !== false;
+
+    reconcile(secPinned, pinned.map(({ item, wins }) => ({
+        key: 'p:' + item.path,
+        ctx: { item, wins },
+        icon: item.iconData,
+        label: item.name,
+        tip: wins.length === 1 ? item.name + ' — ' + wins[0].title : item.name
+    })));
+
+    reconcile(secRunning, showRunning ? running.map(({ key, wins }) => {
+        ensureExeIcon(wins[0]);
+        const name = path.basename(wins[0].exe, path.extname(wins[0].exe));
+        return {
+            key: 'r:' + key,
+            ctx: { wins },
+            icon: exeIcons.get(key),
+            label: name,
+            tip: wins.length === 1 ? wins[0].title : name + ' (' + wins.length + ' janelas)'
+        };
+    }) : []);
+
+    const hasPinned = shortcuts.length > 0;
+    const hasRunning = showRunning && running.length > 0;
+    const hasWidgets = enabledWidgets.length > 0;
+    sepA.style.display = hasPinned || hasRunning || hasWidgets ? '' : 'none';
+    sepB.style.display = hasPinned && hasRunning ? '' : 'none';
+    sepW.style.display = hasWidgets && (hasPinned || hasRunning) ? '' : 'none';
+    measure();
+}
+
+// Ícone do programa; se o .exe não puder ser lido (apps da Store), usa o ícone da própria janela
+function ensureExeIcon(w) {
+    const id = w.key;
+    if (!w.exe || exeIcons.has(id)) return;
+    exeIcons.set(id, null);
+    const name = path.basename(w.exe, path.extname(w.exe));
+    ipcRenderer.invoke('get-icon', w.exe, name)
+        .then((icon) => icon || ipcRenderer.invoke('get-window-icon', w.hwnd))
+        .then((icon) => {
+            if (icon) { exeIcons.set(id, icon); render(); } else exeIcons.delete(id);
+        })
+        .catch(() => exeIcons.delete(id));
+}
+
+ipcRenderer.on('windows-changed', (e, list) => { windows = list; render(); });
+ipcRenderer.invoke('get-windows').then((list) => { windows = list; render(); });
+
+// ---------- Botão Iniciar ----------
+startBtn.title = '';
+startBtn.addEventListener('click', () => send('start-menu'));
+startBtn.addEventListener('contextmenu', async (e) => {
+    e.preventDefault();
+    const choice = await menu([
+        { id: 'settings', label: 'Personalizar dock…' },
+        { separator: true },
+        { id: 'quit', label: 'Sair do dock' }
+    ]);
+    if (choice === 'settings') send('open-settings');
+    else if (choice === 'quit') send('quit-app');
+});
+startBtn.addEventListener('mouseenter', () => { startBtn._tip = 'Iniciar'; showTip(startBtn); });
+startBtn.addEventListener('mouseleave', () => tip.classList.remove('show'));
+
+// ---------- Dica flutuante ----------
+function showTip(el) {
+    if (!el._tip) return;
+    tip.textContent = el._tip;
+    const r = el.getBoundingClientRect();
+    const tw = tip.offsetWidth;
+    const x = Math.max(6, Math.min(window.innerWidth - tw - 6, r.left + r.width / 2 - tw / 2));
+    const above = document.body.dataset.pos !== 'top';
+    // usa a posição da barra (sem a ampliação) para a dica não pular durante o zoom
+    const bar = dock.getBoundingClientRect();
+    tip.style.transform = '';
+    tip.style.left = x + 'px';
+    tip.style.top = (above ? Math.max(2, bar.top - tip.offsetHeight - 22) : bar.bottom + 22) + 'px';
+    tip.classList.add('show');
+}
+
+// ---------- Ampliação suave dos ícones sob o mouse ----------
+let magFrame = 0;
+let mouseX = null;
+function applyMagnify() {
+    magFrame = 0;
+    const items = dock.querySelectorAll('.dock-item:not(.leaving)');
+    const size = parseFloat(getComputedStyle(items[0] || dock).getPropertyValue('--size')) || 44;
+    const reach = size * 2.4;
+    for (const el of items) {
+        let mag = 0;
+        if (mouseX !== null) {
+            const r = el.getBoundingClientRect();
+            const d = Math.abs(mouseX - (r.left + r.width / 2));
+            if (d < reach) mag = Math.pow(Math.cos((d / reach) * Math.PI / 2), 2);
+        }
+        el.style.setProperty('--mag', mag.toFixed(3));
+    }
+}
+dock.addEventListener('mousemove', (e) => {
+    mouseX = e.clientX;
+    if (!magFrame) magFrame = requestAnimationFrame(applyMagnify);
+});
+dock.addEventListener('mouseleave', () => {
+    mouseX = null;
+    tip.classList.remove('show');
+    if (!magFrame) magFrame = requestAnimationFrame(applyMagnify);
+});
+
+// ---------- Arrastar e soltar para fixar ----------
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; dock.classList.add('dropping'); });
 window.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; dock.classList.remove('dropping'); } });
 window.addEventListener('drop', async (e) => {
     e.preventDefault();
     e.stopPropagation();
+    dragDepth = 0;
+    dock.classList.remove('dropping');
 
     if (e.dataTransfer && e.dataTransfer.files) {
         for (const file of e.dataTransfer.files) {
@@ -130,14 +380,14 @@ window.addEventListener('drop', async (e) => {
             }
         }
         saveShortcuts();
-        renderDock();
+        render();
+        resolveTargets();
     }
 });
 
-loadShortcuts();
-
-// Aplica as configurações de aparência (settings.json) como variáveis CSS
+// ---------- Aparência (settings.json) como variáveis CSS ----------
 function applySettings(s) {
+    settings = s;
     const hex = (s.color || '#f5f3ee').replace('#', '');
     const rgb = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ');
     const root = document.documentElement.style;
@@ -151,19 +401,19 @@ function applySettings(s) {
     root.setProperty('--decor', JSON.stringify(s.decor || ''));
     root.setProperty('--decor-display', s.decor ? 'block' : 'none');
     document.body.dataset.pos = s.position || 'bottom';
+    document.body.dataset.style = s.style || 'vidro';
     currentEffect = s.effect || '';
     const wanted = s.widgets || [];
     if (JSON.stringify(wanted) !== JSON.stringify(enabledWidgets)) {
         enabledWidgets = wanted;
-        renderDock();
-    } else {
-        fitWindow();
+        mountWidgets();
     }
+    render();
 }
 ipcRenderer.invoke('get-settings').then(applySettings);
 ipcRenderer.on('settings-changed', (e, s) => applySettings(s));
 
-// Ajusta o tamanho da janela ao conteúdo e desenha os efeitos
+// ---------- Efeitos (neve, morcegos...) ----------
 let fxKey = null;
 const FX_TALL = ['snow', 'santa', 'bats'];
 
@@ -215,48 +465,83 @@ function buildFx(list) {
     document.body.appendChild(fx);
 }
 
-function fitWindow() {
+// ---------- Medidas: encaixe na tela, tamanho da janela e luzes ----------
+let measureQueued = false;
+let lightsKey = '';
+let lastLayout = '';
+
+function measure() {
+    if (measureQueued) return;
+    measureQueued = true;
     requestAnimationFrame(() => {
+        measureQueued = false;
         const list = currentEffect.split(',').map((e) => e.trim()).filter(Boolean);
-        const old = dock.querySelector('.dock-lights');
-        if (old) old.remove();
+        const root = document.documentElement.style;
 
-        const contentWidth = Math.ceil(dock.scrollWidth);
+        // Muitos itens: encolhe os ícones em vez de passar da tela
+        const count = dock.querySelectorAll('.dock-item:not(.leaving)').length;
+        const size = parseFloat(settings.iconSize) || 44;
+        const fit = parseFloat(root.getPropertyValue('--fit')) || 1;
+        const fixed = dock.offsetWidth - count * size * fit;
+        const avail = window.innerWidth - 24;
+        const wantFit = Math.max(0.45, Math.min(1, (avail - fixed) / (count * size || 1)));
+        if (Math.abs(wantFit - fit) > 0.005) root.setProperty('--fit', wantFit.toFixed(3));
+
+        const rect = dock.getBoundingClientRect();
         const tall = list.some((e) => FX_TALL.includes(e));
-        ipcRenderer.send('resize-dock', {
-            width: contentWidth + 20,
-            height: tall ? 150 : 90,
-            barW: contentWidth,
-            barH: dock.offsetHeight
-        });
-        buildFx(list);
-
-        if (list.includes('lights')) {
-            const colors = ['#ff3b3b', '#35d46a', '#ffd43b', '#4dabff'];
-            const count = Math.max(4, Math.floor(contentWidth / 22));
-            const lights = document.createElement('div');
-            lights.className = 'dock-lights';
-            lights.style.width = contentWidth + 'px';
-            for (let i = 0; i < count; i++) {
-                const bulb = document.createElement('span');
-                bulb.style.color = colors[i % colors.length];
-                bulb.style.animationDelay = ((i % 4) * 0.4) + 's';
-                lights.appendChild(bulb);
-            }
-            dock.appendChild(lights);
+        // altura: barra + margem + ampliação dos ícones + dica
+        const need = Math.ceil(rect.height + 15 + size * 0.45 + 8 + 40);
+        const height = tall ? Math.max(need, 170) : need;
+        const bar = {
+            x: Math.round(rect.left), w: Math.round(rect.width),
+            h: Math.round(rect.height)
+        };
+        // y da barra dentro da janela (a janela é redimensionada pelo processo principal; calculamos pela posição)
+        bar.y = document.body.dataset.pos === 'top' ? 15 : height - 15 - bar.h;
+        const key = JSON.stringify([bar, height]);
+        if (key !== lastLayout) {
+            lastLayout = key;
+            send('bar-layout', { bar, height });
         }
+
+        root.setProperty('--fx-left', Math.round(rect.left - 10) + 'px');
+        root.setProperty('--fx-width', Math.round(rect.width + 20) + 'px');
+        buildFx(list);
+        buildLights(list, Math.round(rect.width - 28));
     });
 }
 
-// Rolagem horizontal com a roda do mouse quando passar do limite da tela
-dock.addEventListener('wheel', (e) => { dock.scrollLeft += e.deltaY; });
+function buildLights(list, width) {
+    const key = list.includes('lights') ? String(width) : '';
+    if (key === lightsKey) return;
+    lightsKey = key;
+    const old = dock.querySelector('.dock-lights');
+    if (old) old.remove();
+    if (!key) return;
+    const colors = ['#ff3b3b', '#35d46a', '#ffd43b', '#4dabff'];
+    const count = Math.max(4, Math.floor(width / 22));
+    const lights = document.createElement('div');
+    lights.className = 'dock-lights';
+    lights.style.width = width + 'px';
+    for (let i = 0; i < count; i++) {
+        const bulb = document.createElement('span');
+        bulb.style.color = colors[i % colors.length];
+        bulb.style.animationDelay = ((i % 4) * 0.4) + 's';
+        lights.appendChild(bulb);
+    }
+    dock.appendChild(lights);
+}
 
-// ---- Widgets: arquivos .js nas pastas "widgets" (do app e do usuário) ----
+// A barra cresce e encolhe com animação: acompanha cada quadro
+new ResizeObserver(measure).observe(dock);
+window.addEventListener('resize', measure);
+
+// ---------- Widgets: arquivos .js nas pastas "widgets" (do app e do usuário) ----------
 const widgetApi = {
     openUrl: (url) => shell.openExternal(url),
     openPath: (p) => shell.openPath(p),
     dataDir: path.dirname(configPath),
-    refreshLayout: () => fitWindow()
+    refreshLayout: () => measure()
 };
 
 function findWidgetFile(id) {
@@ -272,6 +557,7 @@ function mountWidgets() {
     widgetCleanups.forEach((fn) => { try { fn(); } catch (e) {} });
     widgetCleanups = [];
     document.querySelectorAll('style[data-widget]').forEach((s) => s.remove());
+    secWidgets.innerHTML = '';
 
     for (const id of enabledWidgets) {
         const file = findWidgetFile(id);
@@ -280,7 +566,7 @@ function mountWidgets() {
         const box = document.createElement('div');
         box.className = 'dock-widget';
         box.dataset.widget = id;
-        dock.appendChild(box);
+        secWidgets.appendChild(box);
 
         try {
             delete require.cache[require.resolve(file)];
@@ -300,3 +586,5 @@ function mountWidgets() {
         }
     }
 }
+
+loadShortcuts();

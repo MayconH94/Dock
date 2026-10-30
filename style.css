@@ -22,11 +22,20 @@ html, body {
   padding: 8px 14px;
   border-radius: var(--dock-radius, 20px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-  max-width: calc(100vw - 20px);
+  width: max-content;
   position: relative;
-  overflow-x: auto;
-  scrollbar-width: none;
+  flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s, border-radius 0.3s;
 }
+
+/* Seções: fixados, janelas abertas, widgets */
+.dock-sec {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.dock-sec:empty { display: none; }
 
 #dock::before,
 #dock::after {
@@ -36,35 +45,109 @@ html, body {
   flex-shrink: 0;
 }
 
-#dock::-webkit-scrollbar {
-  display: none;
-}
+/* Arrastando um arquivo para fixar */
+#dock.dropping { box-shadow: 0 0 0 2px var(--accent, #0066ff), 0 10px 30px rgba(0, 0, 0, 0.2); }
 
 /* Itens / Ícones Padrão */
 .dock-item {
-  width: var(--item-size, 44px);
-  height: var(--item-size, 44px);
-  border-radius: calc(var(--item-size, 44px) * 0.27);
+  --size: calc(var(--item-size, 44px) * var(--fit, 1));
+  --lift: -1;
+  width: var(--size);
+  height: var(--size);
+  flex-shrink: 0;
+  position: relative;
+  border-radius: calc(var(--size) * 0.27);
   background: var(--item-bg, rgba(255, 255, 255, 0.25));
   display: flex;
   justify-content: center;
   align-items: center;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+  /* --mag (0 a 1) é definido pelo mouse: o ícone sob o cursor cresce e os vizinhos acompanham */
+  transform-origin: 50% 100%;
+  transform: translateY(calc(var(--mag, 0) * var(--lift) * 8px)) scale(calc(1 + var(--mag, 0) * 0.42));
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.2s, box-shadow 0.2s;
+  will-change: transform;
 }
+
+body[data-pos="top"] .dock-item { --lift: 1; transform-origin: 50% 0; }
 
 .dock-item:hover {
-  transform: translateY(-4px);
-  background: rgba(255, 255, 255, 0.8);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
 }
+.dock-item:active { filter: brightness(0.85); }
 
 .dock-item img {
-  width: calc(var(--item-size, 44px) * 0.55);
-  height: calc(var(--item-size, 44px) * 0.55);
+  width: calc(var(--size) * 0.55);
+  height: calc(var(--size) * 0.55);
   object-fit: contain;
   pointer-events: none;
 }
+
+.dock-item .initial {
+  color: #333;
+  font: bold 14px sans-serif;
+  pointer-events: none;
+}
+
+.dock-item.start { background: var(--accent, #0066ff); }
+.dock-item.start span { color: #fff; font-weight: bold; font-size: 16px; pointer-events: none; }
+
+/* Janela em primeiro plano */
+.dock-item.active { background: rgba(255, 255, 255, 0.5); }
+
+/* Pontinhos embaixo: um por janela aberta (até 3); o ativo fica alongado e brilhante */
+.dock-item .dots {
+  position: absolute;
+  bottom: -6px;
+  left: 0; right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+  pointer-events: none;
+}
+body[data-pos="top"] .dock-item .dots { bottom: auto; top: -6px; }
+.dock-item .dots i {
+  width: 4px; height: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.7);
+  transition: width 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.25s, box-shadow 0.25s;
+}
+.dock-item.active .dots i { width: 14px; background: #fff; box-shadow: 0 0 6px rgba(255, 255, 255, 0.9); }
+.dock-item.minimized img { opacity: 0.6; }
+
+/* Entrada e saída suaves dos itens */
+.dock-item.entering { animation: item-in 0.38s cubic-bezier(0.2, 0.9, 0.3, 1.15) both; }
+.dock-item.leaving { animation: item-out 0.24s cubic-bezier(0.4, 0, 1, 1) both; pointer-events: none; }
+
+@keyframes item-in {
+  from { width: 0; margin: 0 -4px; opacity: 0; transform: scale(0.3); }
+}
+@keyframes item-out {
+  to { width: 0; margin: 0 -4px; opacity: 0; transform: scale(0.3); }
+}
+
+/* Dica (nome do app) acima do ícone */
+#tip {
+  position: fixed;
+  left: 0; top: 0;
+  max-width: 280px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(24, 24, 28, 0.88);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  font: 12px 'Segoe UI', sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s, transform 0.15s;
+  z-index: 5;
+}
+#tip.show { opacity: 1; transform: translateY(0); }
 
 /* Divisor vertical entre os blocos */
 .dock-separator {
@@ -72,6 +155,7 @@ html, body {
   height: 28px;
   background: rgba(0, 0, 0, 0.15);
   margin: 0 4px;
+  flex-shrink: 0;
 }
 
 /* Pisca-pisca (efeito do tema Natal) */
@@ -117,7 +201,9 @@ body[data-pos="top"] {
 /* Camada de efeitos (morcegos, neve, Papai Noel) */
 #fx {
   position: fixed;
-  inset: 0;
+  top: 0; bottom: 0;
+  left: var(--fx-left, 0);
+  width: var(--fx-width, 100%);
   overflow: hidden;
   pointer-events: none;
   z-index: 2;
@@ -186,6 +272,48 @@ body[data-pos="top"] {
   background: var(--item-bg, rgba(255, 255, 255, 0.25));
   color: #fff;
   font-family: 'Segoe UI', sans-serif;
+  animation: item-in 0.38s cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
   white-space: nowrap;
   flex-shrink: 0;
 }
+
+/* ---------- Estilos do dock (body[data-style]) ---------- */
+body[data-style="solido"] #dock {
+  background: rgb(var(--dock-rgb, 0, 0, 0));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+body[data-style="minimalista"] #dock {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+body[data-style="minimalista"] .dock-item { background: transparent; }
+body[data-style="minimalista"] .dock-item:hover,
+body[data-style="minimalista"] .dock-item.active { background: rgba(255, 255, 255, 0.22); box-shadow: none; }
+body[data-style="minimalista"] .dock-separator { opacity: 0; }
+body[data-style="minimalista"] .dock-item img { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)); }
+
+/* Cada seção vira uma "ilha" de vidro separada */
+body[data-style="ilhas"] #dock {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  padding: 0;
+  gap: 10px;
+}
+body[data-style="ilhas"] .dock-separator { display: none !important; }
+body[data-style="ilhas"] .dock-sec,
+body[data-style="ilhas"] #start {
+  background: rgba(var(--dock-rgb, 0, 0, 0), var(--dock-opacity, 0.35));
+  backdrop-filter: blur(var(--dock-blur, 20px));
+  -webkit-backdrop-filter: blur(var(--dock-blur, 20px));
+  border-radius: var(--dock-radius, 20px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  padding: 8px 10px;
+}
+body[data-style="ilhas"] #start { padding: 0; background: var(--accent, #0066ff); backdrop-filter: none; }

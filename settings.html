@@ -12,6 +12,7 @@
   input[type=range] { width: 100%; }
   input[type=color] { width: 100%; height: 30px; border: 1px solid #ccc; border-radius: 6px; padding: 2px; background: #fff; }
   select { padding: 6px; border-radius: 6px; border: 1px solid #ccc; }
+  .check { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
   #widgets label { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
   #widgets .vazio { color: #888; font-size: 12px; }
   button { margin-top: 4px; padding: 8px; border: 0; border-radius: 6px; background: #0066ff; color: #fff; cursor: pointer; }
@@ -32,8 +33,16 @@
     <input type="range" id="radius" min="0" max="40" step="1"></div>
   <div class="row"><div class="label"><span>Desfoque</span><span id="v-blur"></span></div>
     <input type="range" id="blur" min="0" max="40" step="1"></div>
+  <div class="row"><div class="label"><span>Estilo do dock</span></div>
+    <select id="style"><option value="vidro">Vidro</option><option value="solido">Sólido</option><option value="minimalista">Minimalista</option><option value="ilhas">Ilhas</option></select></div>
   <div class="row"><div class="label"><span>Posição na tela</span></div>
     <select id="position"><option value="bottom">Embaixo</option><option value="top">Em cima</option></select></div>
+  <div class="row">
+    <label class="check"><input type="checkbox" id="taskbar"> Mostrar janelas abertas (barra de tarefas)</label>
+    <label class="check"><input type="checkbox" id="allWindows"> Todos os tipos de janela (diálogos, ferramentas)</label>
+    <label class="check"><input type="checkbox" id="reserve"> Reservar espaço (janelas não ficam atrás)</label>
+    <label class="check"><input type="checkbox" id="autostart"> Iniciar com o Windows</label>
+  </div>
   <div class="row"><div class="label"><span>Widgets</span></div>
     <div id="widgets"></div></div>
   <button id="reset">Restaurar padrão</button>
@@ -42,7 +51,8 @@
 const { ipcRenderer } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const ids = ['theme', 'opacity', 'color', 'iconSize', 'radius', 'blur', 'position'];
+const ids = ['theme', 'opacity', 'color', 'iconSize', 'radius', 'blur', 'position', 'style'];
+const flags = ['taskbar', 'allWindows', 'reserve', 'autostart'];
 const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 let timer;
 
@@ -91,6 +101,8 @@ function show(s) {
   el.radius.value = s.radius;
   el.blur.value = s.blur;
   el.position.value = s.position;
+  el.style.value = s.style || 'vidro';
+  flags.forEach((f) => { document.getElementById(f).checked = !!s[f]; });
   labels();
 }
 function labels() {
@@ -107,7 +119,9 @@ function collect() {
     radius: Number(el.radius.value),
     blur: Number(el.blur.value),
     position: el.position.value,
+    style: el.style.value,
     theme: el.theme.value,
+    ...Object.fromEntries(flags.map((f) => [f, document.getElementById(f).checked])),
     widgets: [...document.querySelectorAll('#widgets input:checked')].map((c) => c.value)
   };
 }
@@ -117,6 +131,7 @@ function send() {
   timer = setTimeout(() => ipcRenderer.send('save-settings', collect()), 60);
 }
 ids.filter((id) => id !== 'theme').forEach((id) => el[id].addEventListener('input', send));
+flags.forEach((f) => document.getElementById(f).addEventListener('change', send));
 el.theme.addEventListener('change', async () => {
   show(await ipcRenderer.invoke('apply-theme', el.theme.value));
 });

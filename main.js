@@ -1,6 +1,13 @@
-const { app, BrowserWindow, screen, ipcMain, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, shell, nativeImage, Menu } = require('electron');
 const fs = require('fs');
 const path = require('path');
+
+// API do Windows (lista de janelas, reserva de espaço). Se falhar, o dock funciona só como lançador.
+let winapi = null;
+try { winapi = require('./winapi'); } catch (e) { console.error('winapi indisponível:', e.message); }
+
+// Só uma cópia do dock por vez
+if (!app.requestSingleInstanceLock()) app.quit();
 
 // Dados do usuário (atalhos, configurações, ícones, temas próprios) ficam fora da pasta do programa,
 // senão não dá para gravar quando o app está instalado como .exe.
@@ -26,87 +33,211 @@ let settingsWin = null;
 const settingsPath = path.join(dataDir, 'settings.json');
 const defaultSettings = {
   theme: 'padrao', opacity: 0.35, color: '#000000', radius: 20, iconSize: 44, blur: 20, position: 'bottom',
-  itemColor: 'rgba(255, 255, 255, 0.25)', accent: '#0066ff', decor: '', effect: '', widgets: []
+  itemColor: 'rgba(255, 255, 255, 0.25)', accent: '#0066ff', decor: '', effect: '', widgets: [],
+  taskbar: true,     // mostra as janelas abertas (como a barra de tarefas)
+  reserve: true,     // reserva espaço na tela: janelas maximizadas não ficam atrás do dock
+  autostart: false,  // abre junto com o Windows
+  allWindows: true,  // mostra também janelas de ferramenta e diálogos (não só as da barra do Windows)
+  style: 'vidro'     // vidro | solido | minimalista | ilhas
 };
 const themesDir = path.join(__dirname, 'themes');          // temas que vêm com o app
 const userThemesDir = path.join(dataDir, 'themes');        // temas criados por você
 
-function loadSettings() {
+function readSettings() {
   try { return { ...defaultSettings, ...JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) }; }
   catch (e) { return { ...defaultSettings }; }
 }
+let settings = readSettings();
 
-let dockWidth = 950;
-let dockHeight = 90;
-let barW = 0;
-let barH = 60;
-let dockAtTop = false;
+// Grava, avisa o dock e aplica o que depende do sistema
+function commitSettings(next) {
+  settings = next;
+  try { fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2)); } catch (e) {}
+  if (dockWin) dockWin.webContents.send('settings-changed', settings);
+  if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!settings.autostart });
+  placeDock();
+  scheduleReservation();
+  pollWindows();
+}
+
+// ---- Posição da janela ----
+// A janela ocupa a largura toda da área útil e é transparente: a barra cresce/encolhe só por CSS
+// (animações fluidas) e o mouse atravessa tudo que não for a barra.
+const MARGIN = 15;                 // distância da barra até a borda da tela
+let layout = { bar: { x: 0, y: 0, w: 0, h: 60 }, height: 130 };
+let reservedDip = 0;               // espessura que reservamos na tela
+let reservedTop = false;
 
 function placeDock() {
   if (!dockWin) return;
-  const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
-  dockAtTop = loadSettings().position === 'top';
-  const w = Math.min(dockWidth, width);
-  dockWin.setBounds({
-    x: x + Math.floor((width - w) / 2),
-    y: dockAtTop ? y + 15 : y + height - dockHeight - 15,
-    width: w,
-    height: dockHeight
-  });
+  const wa = screen.getPrimaryDisplay().workArea;
+  const top = settings.position === 'top';
+  const h = layout.height;
+  // workArea já descontou a nossa própria reserva: somamos de volta para achar a borda real
+  const bounds = {
+    x: wa.x,
+    y: top ? wa.y - (reservedTop ? reservedDip : 0) : wa.y + wa.height + (reservedTop ? 0 : reservedDip) - h,
+    width: wa.width,
+    height: h
+  };
+  const cur = dockWin.getBounds();
+  if (cur.x !== bounds.x || cur.y !== bounds.y || cur.width !== bounds.width || cur.height !== bounds.height) {
+    dockWin.setBounds(bounds);
+  }
 }
 
-// Com efeitos a janela fica mais alta: o clique atravessa as áreas vazias e só a barra recebe o mouse
-let mouseTimer = null;
-let ignoring = false;
-function updateMouseThrough() {
-  if (!dockWin) return;
-  if (dockHeight <= 90) {
-    if (mouseTimer) { clearInterval(mouseTimer); mouseTimer = null; }
-    if (ignoring) { dockWin.setIgnoreMouseEvents(false); ignoring = false; }
+// ---- Reserva de espaço (AppBar do Windows) ----
+let reserveTimer = null;
+function scheduleReservation(force) {
+  clearTimeout(reserveTimer);
+  reserveTimer = setTimeout(() => updateReservation(force), 150);
+}
+
+const handleOf = () => Number(dockWin.getNativeWindowHandle().readBigUInt64LE(0));
+
+function updateReservation(force) {
+  if (!dockWin || !winapi) return;
+  const top = settings.position === 'top';
+  const thickness = Math.round(layout.bar.h + MARGIN + 6);
+
+  if (!settings.reserve || layout.bar.w <= 0) { releaseReservation(); return; }
+  if (reservedDip === thickness && reservedTop === top && !force) return;
+  if (reservedDip && (reservedTop !== top || force)) {
+    releaseReservation();
+    setTimeout(() => updateReservation(), 150);   // espera o Windows atualizar a área útil
     return;
   }
-  if (mouseTimer) return;
-  mouseTimer = setInterval(() => {
-    if (!dockWin) { clearInterval(mouseTimer); mouseTimer = null; return; }
-    const b = dockWin.getBounds();
-    const p = screen.getCursorScreenPoint();
-    const rw = Math.min(barW, b.width - 20);
-    const rx = b.x + (b.width - rw) / 2;
-    const ry = dockAtTop ? b.y + 15 : b.y + b.height - 15 - barH;
-    const inside = p.x >= rx - 6 && p.x <= rx + rw + 6 && p.y >= ry - 6 && p.y <= ry + barH + 6;
-    if (!inside !== ignoring) {
-      dockWin.setIgnoreMouseEvents(!inside, { forward: true });
-      ignoring = !inside;
-    }
-  }, 80);
+
+  // Área útil livre = workArea atual + o que já reservamos
+  const wa = { ...screen.getPrimaryDisplay().workArea };
+  if (reservedDip) { if (reservedTop) wa.y -= reservedDip; wa.height += reservedDip; }
+  const rect = screen.dipToScreenRect(dockWin, {
+    x: wa.x, width: wa.width, height: thickness,
+    y: top ? wa.y : wa.y + wa.height - thickness
+  });
+  try {
+    winapi.appBarReserve(handleOf(), top, {
+      left: rect.x, top: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height
+    });
+    reservedDip = thickness;
+    reservedTop = top;
+    placeDock();
+  } catch (e) { console.error('Falha ao reservar espaço:', e.message); }
 }
 
-// A janela cresce/encolhe conforme os atalhos e os efeitos
-ipcMain.on('resize-dock', (event, d) => {
-  dockWidth = Math.max(160, Math.ceil(d.width));
-  dockHeight = d.height || 90;
-  barW = d.barW || 0;
-  barH = d.barH || 60;
+function releaseReservation() {
+  if (!reservedDip) return;
+  try { if (dockWin && winapi) winapi.appBarRelease(handleOf()); } catch (e) {}
+  reservedDip = 0;
   placeDock();
-  updateMouseThrough();
+}
+
+// ---- Mouse atravessa a janela, exceto sobre a barra ----
+let ignoring = false;
+function pollCursor() {
+  if (!dockWin || !dockWin.isVisible()) return;
+  const b = dockWin.getBounds();
+  const p = screen.getCursorScreenPoint();
+  const r = layout.bar;
+  const inside = p.x >= b.x + r.x - 4 && p.x <= b.x + r.x + r.w + 4
+    && p.y >= b.y + r.y - 4 && p.y <= b.y + r.y + r.h + 4;
+  if (!inside !== ignoring) {
+    dockWin.setIgnoreMouseEvents(!inside, { forward: true });
+    ignoring = !inside;
+  }
+}
+
+// O renderer informa onde está a barra e quanta altura a janela precisa (efeitos, dicas)
+ipcMain.on('bar-layout', (event, d) => {
+  const hChanged = d.bar.h !== layout.bar.h || (d.bar.w > 0) !== (layout.bar.w > 0);
+  layout = { bar: d.bar, height: Math.max(90, Math.ceil(d.height)) };
+  placeDock();
+  // a reserva só depende da altura da barra: ignorar mudanças de largura evita refazê-la o tempo todo
+  if (hChanged) scheduleReservation();
 });
 
+// ---- Janelas abertas (barra de tarefas) ----
+const ownPids = new Set([process.pid]);
+const DESKTOP_CLASSES = new Set(['Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd']);
+let lastList = [];
+let lastJson = '[]';
+let hiddenForFullscreen = false;
+
+// Esconde o dock quando um app ocupa a tela inteira (vídeo, jogo), como a barra do Windows
+function updateFullscreen() {
+  const fg = winapi.foregroundInfo();
+  let full = false;
+  if (fg && !fg.hasCaption && !ownPids.has(fg.pid) && !DESKTOP_CLASSES.has(fg.cls)) {
+    const r = screen.dipToScreenRect(null, screen.getPrimaryDisplay().bounds);
+    full = fg.rect.left <= r.x && fg.rect.top <= r.y
+      && fg.rect.right >= r.x + r.width && fg.rect.bottom >= r.y + r.height;
+  }
+  if (full === hiddenForFullscreen) return;
+  hiddenForFullscreen = full;
+  if (full) dockWin.hide(); else dockWin.showInactive();
+}
+
+function pollWindows() {
+  if (!dockWin || !winapi) return;
+  try {
+    updateFullscreen();
+    const list = settings.taskbar ? winapi.listWindows(ownPids, settings.allWindows).map((w) => ({
+      hwnd: w.hwnd, title: w.title, exe: w.exe, active: w.active, minimized: w.minimized,
+      // apps da Store compartilham o ApplicationFrameHost: cada janela vira seu próprio grupo
+      key: /applicationframehost\.exe$/i.test(w.exe) ? 'uwp:' + w.title : w.exe.toLowerCase()
+    })) : [];
+    const json = JSON.stringify(list);
+    if (json === lastJson) return;
+    lastJson = json;
+    lastList = list;
+    dockWin.webContents.send('windows-changed', list);
+  } catch (e) { console.error('Erro ao listar janelas:', e.message); }
+}
+
+ipcMain.handle('get-windows', () => lastList);
+
+ipcMain.on('window-action', (event, action, hwnd) => {
+  if (!winapi) return;
+  try {
+    if (action === 'activate') winapi.activate(hwnd);
+    else if (action === 'minimize') winapi.minimize(hwnd);
+    else if (action === 'close') winapi.close(hwnd);
+  } catch (e) { console.error(e.message); }
+  setTimeout(pollWindows, 120);
+});
+
+ipcMain.on('start-menu', () => { if (winapi) winapi.pressWinKey(); });
+ipcMain.on('quit-app', () => app.quit());
+
+// Menu nativo de clique direito: recebe [{id, label}] (ou {separator:true}) e devolve o id escolhido
+ipcMain.handle('context-menu', (event, items) => new Promise((resolve) => {
+  const template = items.map((i) => i.separator ? { type: 'separator' } : { label: i.label, click: () => resolve(i.id) });
+  Menu.buildFromTemplate(template).popup({ window: dockWin, callback: () => resolve(null) });
+}));
+
 function createWindow() {
+  const wa = screen.getPrimaryDisplay().workArea;
   const win = new BrowserWindow({
-    width: 950,
-    height: 90,
+    x: wa.x, y: wa.y + wa.height - layout.height, width: wa.width, height: layout.height,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
     alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,      // clicar no dock não rouba o foco do programa que você está usando
     resizable: false,
+    hasShadow: false,
     webPreferences: {
       nodeIntegration: true,
-      contextIsolation: false
+      contextIsolation: false,
+      backgroundThrottling: false
     }
   });
 
   dockWin = win;
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setIgnoreMouseEvents(true, { forward: true });
+  ignoring = true;
   win.on('closed', () => { dockWin = null; });
   win.loadFile('index.html');
   placeDock();
@@ -167,16 +298,28 @@ ipcMain.handle('get-icon', async (event, filePath, name) => {
   }
 });
 
+// Ícone tirado da própria janela (apps da Store). Devolve data URL ou null
+ipcMain.handle('get-window-icon', (event, hwnd) => {
+  try {
+    const ico = winapi && winapi.windowIcon(hwnd);
+    if (!ico) return null;
+    return nativeImage.createFromBitmap(ico.bgra, { width: ico.width, height: ico.height }).toDataURL();
+  } catch (e) { return null; }
+});
+
+// Alvo real de um atalho .lnk (para saber se o programa já está aberto)
+ipcMain.handle('resolve-target', (event, filePath) => {
+  try {
+    if (path.extname(filePath).toLowerCase() === '.lnk') return expandEnv(shell.readShortcutLink(filePath).target) || '';
+  } catch (e) {}
+  return filePath;
+});
+
 
 // ---- Configurações personalizáveis (sem mexer no código) ----
-ipcMain.handle('get-settings', () => loadSettings());
+ipcMain.handle('get-settings', () => settings);
 
-ipcMain.on('save-settings', (event, settings) => {
-  const merged = { ...loadSettings(), ...settings };
-  try { fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2)); } catch (e) {}
-  if (dockWin) dockWin.webContents.send('settings-changed', merged);
-  placeDock();
-});
+ipcMain.on('save-settings', (event, incoming) => commitSettings({ ...settings, ...incoming }));
 
 function readThemes(dir) {
   try {
@@ -195,26 +338,21 @@ ipcMain.handle('get-themes', () => {
 
 ipcMain.handle('apply-theme', (event, id) => {
   const theme = readThemes(userThemesDir).concat(readThemes(themesDir)).find((t) => t.id === id);
-  if (!theme) return loadSettings();
+  if (!theme) return settings;
   const { id: _id, name: _name, ...values } = theme;
-  const merged = { ...loadSettings(), ...values, theme: id };
-  try { fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2)); } catch (e) {}
-  if (dockWin) dockWin.webContents.send('settings-changed', merged);
-  placeDock();
-  return merged;
+  commitSettings({ ...settings, ...values, theme: id });
+  return settings;
 });
 
 ipcMain.handle('reset-settings', () => {
-  try { fs.writeFileSync(settingsPath, JSON.stringify(defaultSettings, null, 2)); } catch (e) {}
-  if (dockWin) dockWin.webContents.send('settings-changed', defaultSettings);
-  placeDock();
-  return { ...defaultSettings };
+  commitSettings({ ...defaultSettings });
+  return settings;
 });
 
 ipcMain.on('open-settings', () => {
   if (settingsWin) { settingsWin.focus(); return; }
   settingsWin = new BrowserWindow({
-    width: 340, height: 620, title: 'Configurações do dock',
+    width: 340, height: 720, title: 'Configurações do dock',
     autoHideMenuBar: true, resizable: false, alwaysOnTop: true,
     webPreferences: { nodeIntegration: true, contextIsolation: false }
   });
@@ -223,7 +361,21 @@ ipcMain.on('open-settings', () => {
   settingsWin.on('closed', () => { settingsWin = null; });
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  setInterval(pollWindows, 500);
+  setInterval(pollCursor, 50);
+  if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!settings.autostart });
+
+  // Mudou a resolução / monitor: reposiciona e refaz a reserva só se os limites da tela mudaram
+  // (a reserva em si altera a workArea, então ignoramos esse tipo de evento para não entrar em loop)
+  screen.on('display-metrics-changed', (e, display, changed) => {
+    placeDock();
+    if (changed.includes('bounds')) scheduleReservation(true);
+  });
+});
+
+app.on('before-quit', releaseReservation);
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
